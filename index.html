@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Desafíos en Producción: Depurando CORS y Sesiones en el Despliegue de un Stack MERN</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <header>
+        <div class="nav-container">
+            <a href="#" class="logo">DevLog</a>
+            <ul class="nav-links">
+                <li><a href="#blog">Blog</a></li>
+                <li><a href="#commits">Commits</a></li>
+                <li><a href="#reflexion">Reflexión</a></li>
+            </ul>
+        </div>
+    </header>
+
+    <main class="container" id="blog">
+        <article>
+            <div class="post-meta">
+                <span class="category-tag">Full Stack</span>
+                <span>30 de junio, 2026</span>
+                <span>• Lectura: 6 min</span>
+            </div>
+
+            <h1 class="post-title">Desafíos en Producción: Depurando CORS y Sesiones en el Despliegue de un Stack MERN</h1>
+
+            <div class="author-card">
+                <div class="avatar">CH</div>
+                <div class="author-info">
+                    <h4>Estudiante Coderhouse</h4>
+                    <p>Diplomatura de Desarrollo Full Stack</p>
+                </div>
+            </div>
+
+            <section class="post-content">
+                <h2>Contexto</h2>
+                <p>
+                    Durante el desarrollo de nuestro proyecto final para la Diplomatura, implementamos una aplicación de gestión de tareas colaborativas utilizando el clásico stack <strong>MERN</strong> (MongoDB, Express, React y Node.js). En el entorno de desarrollo local (<code>localhost</code>), todo funcionaba a la perfección: el inicio de sesión autenticaba al usuario, guardaba una cookie de sesión cifrada y permitía consumir las rutas protegidas de nuestra API. 
+                </p>
+                <p>
+                    El reto comenzó cuando llegó el momento de desplegar la aplicación a producción. Decidimos hospedar el frontend de React en <strong>Vercel</strong> (bajo el dominio <code>https://gestor-frontend.vercel.app</code>) y la API de Express en <strong>Render</strong> (bajo el dominio <code>https://gestor-api.onrender.com</code>). 
+                </p>
+
+                <h2>El Problema</h2>
+                <p>
+                    Inmediatamente después de realizar los despliegues, nos enfrentamos a un muro: los usuarios no podían iniciar sesión. Al inspeccionar la consola de las herramientas de desarrollo del navegador, nos topamos con un error persistente y temido:
+                </p>
+                
+                <pre><code>Access to XMLHttpRequest at 'https://gestor-api.onrender.com/api/auth/login' from origin 'https://gestor-frontend.vercel.app' has been blocked by CORS policy: Response to preflight request doesn't pass access control check: No 'Access-Control-Allow-Origin' header is present on the requested resource.</code></pre>
+
+                <p>
+                    Tras habilitar CORS en el backend de forma básica permitiendo el origen del frontend, logramos que la petición de login respondiera con éxito (200 OK). Sin embargo, surgió un segundo problema silencioso: las cookies de sesión (JSON Web Tokens en cookies seguras) no se guardaban en el navegador del frontend. Como consecuencia, cualquier petición posterior a rutas protegidas devolvía un código de error de autenticación <code>401 Unauthorized</code>.
+                </p>
+
+                <div class="callout-warning">
+                    <div class="callout-title">⚠️ Impacto en el equipo</div>
+                    <p>El error detuvo las pruebas de usabilidad y generó cierta frustración y tensión en el equipo, ya que faltaban pocas horas para la presentación del prototipo inicial y el sistema parecía "completamente roto" en producción a pesar de funcionar en nuestras máquinas.</p>
+                </div>
+
+                <h2>Acciones Tomadas</h2>
+                <p>
+                    Adoptando una <strong>mentalidad de crecimiento</strong>, entendimos que este cuello de botella era una oportunidad de aprendizaje profundo sobre los protocolos de seguridad web en producción y cómo difieren del desarrollo local. Estructuramos un plan de acción constructivo:
+                </p>
+
+                <h3>1. Post-Mortem Constructivo y Diagnóstico</h3>
+                <p>
+                    Nos reunimos a revisar el flujo de red. Identificamos que el problema de CORS original se debía a que el middleware en el servidor no estaba configurado para aceptar peticiones con credenciales (cookies) desde orígenes cruzados. 
+                </p>
+                <p>
+                    En el entorno local, al estar ambos servicios bajo <code>localhost</code>, la seguridad de las cookies es mucho más permisiva. En producción, al haber dominios cruzados (<code>vercel.app</code> y <code>onrender.com</code>), los navegadores modernos bloquean por defecto las cookies a menos que se cumplan criterios específicos de seguridad (directivas <code>SameSite</code> y <code>Secure</code>).
+                </p>
+
+                <h3>2. Modificaciones en el Backend (Express.js)</h3>
+                <p>
+                    Ajustamos la configuración del middleware de CORS para especificar explícitamente el origen del frontend y permitir el intercambio de credenciales:
+                </p>
+
+                <pre><code>// server.js
+const cors = require('cors');
+
+app.use(cors({
+    origin: 'https://gestor-frontend.vercel.app',
+    credentials: true, // Permite el envío de cookies a través de dominios
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+}));</code></pre>
+
+                <p>
+                    Adicionalmente, modificamos la lógica que genera y firma la cookie de sesión en el controlador de inicio de sesión:
+                </p>
+
+                <pre><code>// controllers/authController.js
+res.cookie('token', token, {
+    httpOnly: true, // Previene acceso por scripts maliciosos (XSS)
+    secure: true,   // Obligatorio para SameSite=None, requiere HTTPS
+    sameSite: 'none', // Permite que la cookie se envíe en peticiones cross-site
+    maxAge: 24 * 60 * 60 * 1000 // 1 día
+});</code></pre>
+
+                <h3>3. Modificaciones en el Frontend (React y Axios)</h3>
+                <p>
+                    En el cliente, configuramos una instancia global de Axios para asegurar que todas las peticiones asíncronas incluyeran de manera automática el parámetro <code>withCredentials</code>:
+                </p>
+
+                <pre><code>// api/axiosInstance.js
+import axios from 'axios';
+
+const api = axios.create({
+    baseURL: 'https://gestor-api.onrender.com/api',
+    withCredentials: true // Adjunta cookies de sesión automáticamente
+});
+
+export default api;</code></pre>
+
+                <div class="callout">
+                    <div class="callout-title">💡 La Solución Definitiva</div>
+                    <p>Una vez aplicados estos cambios en ambos repositorios, el flujo de autenticación funcionó perfectamente. La cookie se almacenó con seguridad en el navegador y las llamadas API a los módulos protegidos fueron exitosas.</p>
+                </div>
+
+                <h2>Aprendizajes</h2>
+                <ul>
+                    <li><strong>Diferencias de Entorno:</strong> Aprendimos que "funciona en mi máquina local" no es garantía de éxito en producción. Los navegadores aplican políticas de seguridad mucho más estrictas para dominios reales que para <code>localhost</code>.</li>
+                    <li><strong>Seguridad Web Avanzada:</strong> Comprendimos el funcionamiento técnico detrás del protocolo de <em>Preflight (OPTIONS)</em> de CORS y la anatomía de las cookies HTTP-Only con sus configuraciones de privacidad (<code>SameSite=None</code> y <code>Secure</code>).</li>
+                    <li><strong>Planificación de Despliegues:</strong> De ahora en adelante, definiremos políticas de CORS e integraciones de red desde la primera fase de desarrollo del proyecto para evitar cuellos de botella de última hora en el despliegue.</li>
+                </ul>
+
+                <h2 id="commits">Evidencia de Control de Versiones</h2>
+                <p>El desarrollo y resolución de este desafío fue registrado de forma transparente mediante el uso de Git y control de versiones:</p>
+                
+                <div class="git-section">
+                    <div class="git-header">
+                        <span class="git-icon">🌿</span>
+                        <h3>Historial de Commits - Repositorio: <code>coderhouse-blog</code></h3>
+                    </div>
+                    <div class="commit-list">
+                        <div class="commit-item">
+                            <a href="#" class="commit-hash">737abc3</a>
+                            <div class="commit-info">
+                                <div class="commit-msg">chore: documentar solución final de CORS y feedback de mentalidad de crecimiento</div>
+                                <div class="commit-date">Hace unos momentos</div>
+                            </div>
+                        </div>
+                        <div class="commit-item">
+                            <a href="#" class="commit-hash">fc2f0f3</a>
+                            <div class="commit-info">
+                                <div class="commit-msg">fix: integrar estilos CSS del blog con soporte responsive y tipografía premium</div>
+                                <div class="commit-date">Hace unos minutos</div>
+                            </div>
+                        </div>
+                        <div class="commit-item">
+                            <a href="#" class="commit-hash">3d6d93e</a>
+                            <div class="commit-info">
+                                <div class="commit-msg">feat: inicializar estructura HTML del blog técnico para entregable Coderhouse</div>
+                                <div class="commit-date">Hace unos minutos</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <h2 id="reflexion">Reflexión sobre Feedback Radicalmente Sincero</h2>
+                <p>
+                    Durante este proceso, la aplicación de la metodología de <strong>Feedback Radicalmente Sincero (Radical Candor)</strong> de Kim Scott fue crucial para el éxito del equipo. Cuando surgió el fallo en el despliegue, estuvimos al borde de culpar al miembro del equipo encargado de DevOps.
+                </p>
+                <p>
+                    En su lugar, decidimos actuar desde el cuadrante del <strong>Afecto Personal con Desafío Directo</strong>. Tuvimos una conversación muy abierta y honesta: le manifestamos directamente que la app estaba fallando en producción y que necesitábamos resolverlo con urgencia (desafío directo), pero al mismo tiempo nos pusimos a disposición para investigar juntos, recordándole que valorábamos mucho su esfuerzo y que sabíamos que las configuraciones de hosting son complejas (afecto personal). 
+                </p>
+                <p>
+                    Esto evitó que cayéramos en la <em>insinceridad manipuladora</em> (no decirle nada y arreglarlo a sus espaldas) o en la <em>agresión ofensiva</em> (criticar su trabajo rudamente frente a todos). Como resultado, el compañero no se sintió atacado, sino apoyado, y pudimos encontrar la solución en menos de una hora, fortaleciendo la confianza del grupo.
+                </p>
+            </section>
+
+            <div class="deliverable-box">
+                <h3>Checklist de Entrega</h3>
+                <ul>
+                    <li><strong>Blog Técnico Publicado:</strong> <a href="#" style="color: var(--accent-cyan);">Ver Blog en GitHub Pages</a> (Reemplazar con tu URL real al desplegar)</li>
+                    <li><strong>Repositorio del Proyecto:</strong> <a href="https://github.com/coder-estudiante/coderhouse-blog" style="color: var(--accent-cyan);" target="_blank">github.com/coder-estudiante/coderhouse-blog</a></li>
+                    <li><strong>Estructura del Blog:</strong> Contexto, Problema, Acciones, Aprendizajes completados con éxito.</li>
+                    <li><strong>Reflexión:</strong> Aplicación práctica de Radical Candor incluida y justificada.</li>
+                </ul>
+            </div>
+        </article>
+    </main>
+
+    <footer>
+        <p>&copy; 2026 - Entregable creado para la Diplomatura de Desarrollo Full Stack, Coderhouse.</p>
+        <p>Materia: Mentalidad de Crecimiento y Comunicación en Entornos Digitales.</p>
+    </footer>
+</body>
+</html>
